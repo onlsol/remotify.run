@@ -1,0 +1,31 @@
+# Local env / secrets - never ship inside an image
+.env
+.env.*
+
+# VCS + CI metadata
+.git
+.gitignore
+.gitlab-ci.yml
+.dockerignore
+
+# Editor / OS cruft
+.vscode
+.idea
+.DS_Store
+*.swp
+*~
+
+# Docs not needed inside images
+*.md
+LICENSE
+NOTICE
+
+# Runtime-only state (not in repo today; defensive)
+data/
+logs/
+tmp/
+db/
+
+# Node artefacts (the MCP server is installed by the end user, not shipped)
+mcp/node_modules
+mcp/package-lock.json

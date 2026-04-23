@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>remotify.run - shell commands over HTTP, no SSH</title>
+<meta name="description" content="HTTP relay for shell commands. Your LLM, CI runner, or terminal pushes a command over HTTPS; the remote machine needs only curl + bash.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231d4ed8'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='ui-monospace,monospace' font-size='15' font-weight='700' fill='white'%3E&gt;_%3C/text%3E%3C/svg%3E">
+<meta property="og:title" content="remotify.run - shell commands over HTTP">
+<meta property="og:description" content="Push a command from your LLM, CI runner, or terminal. Your remote needs only curl + bash. No SSH, no agent.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://remotify.run/">
+<style>
+  :root {
+    --bg:#0a0c10;            --fg:#eaecef;            --muted:#8b919c;
+    --faint:#4e5560;         --card:#12161c;          --card-2:#171c24;
+    --border:#242933;        --border-strong:#30363f;
+    --accent:#8ab4ff;        --accent-hover:#a6c4ff;  --accent-soft:rgba(138,180,255,.14);
+    --green:#7ee787;         --yellow:#f0cc59;        --red:#ff8088;
+    --code-bg:#070a0e;       --shadow:0 20px 50px -30px rgba(0,0,0,.6), 0 6px 20px -10px rgba(0,0,0,.4);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:#f8f8f6;          --fg:#15181d;            --muted:#595f6a;
+      --faint:#9ca1ac;       --card:#ffffff;          --card-2:#fafaf8;
+      --border:#e4e6ea;      --border-strong:#c8ccd3;
+      --accent:#1d4ed8;      --accent-hover:#1e3a8a;  --accent-soft:rgba(29,78,216,.08);
+      --green:#1a7f37;       --yellow:#9a6700;        --red:#cf222e;
+      --code-bg:#f3f4f2;     --shadow:0 12px 30px -18px rgba(0,0,0,.18), 0 2px 8px -4px rgba(0,0,0,.08);
+    }
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--fg);margin:0;
+       font-family:"Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+       line-height:1.6;font-size:16px;-webkit-font-smoothing:antialiased;
+       padding:0 1.25rem 5rem}
+  .wrap{max-width:960px;margin:0 auto}
+
+  /* Top nav */
+  nav{display:flex;justify-content:space-between;align-items:center;padding:1.5rem 0 2rem;
+      font-size:.88rem}
+  nav .brand{font-weight:700;letter-spacing:-.015em;font-size:1rem}
+  nav .brand .dot{color:var(--muted);font-weight:500}
+  nav .links{display:flex;gap:1.5rem;color:var(--muted)}
+  nav a{color:inherit;text-decoration:none}
+  nav a:hover{color:var(--fg)}
+
+  /* HERO */
+  .hero{display:grid;grid-template-columns:1.1fr 1fr;gap:3rem;align-items:center;padding:2.5rem 0 4rem}
+  .hero .tagline{display:inline-block;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase;
+                 font-weight:600;color:var(--accent);background:var(--accent-soft);
+                 padding:.35rem .7rem;border-radius:999px;margin-bottom:1.2rem}
+  .hero h1{margin:0 0 1.2rem;font-size:clamp(2rem, 4.4vw, 3.15rem);
+           line-height:1.05;letter-spacing:-.03em;font-weight:680}
+  .hero h1 em{font-style:normal;color:var(--accent)}
+  .hero .lede{margin:0 0 1.5rem;font-size:1.07rem;color:var(--muted);line-height:1.55;max-width:46ch}
+  .hero .cta{display:flex;gap:.75rem;flex-wrap:wrap;margin-top:.25rem}
+  .btn{display:inline-flex;align-items:center;gap:.45rem;
+       padding:.7rem 1.15rem;border-radius:8px;font-size:.92rem;font-weight:600;
+       cursor:pointer;transition:all .15s;border:1px solid transparent;text-decoration:none;
+       font-family:inherit}
+  .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .btn.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
+  .btn.ghost{background:transparent;color:var(--fg);border-color:var(--border-strong)}
+  .btn.ghost:hover{background:var(--card);border-color:var(--muted)}
+  .btn:disabled{opacity:.55;cursor:not-allowed}
+  @media (max-width:780px){ .hero{grid-template-columns:1fr;gap:2.2rem;padding:1rem 0 3rem} }
+
+  /* TERMINAL MOCK */
+  .term{background:var(--card-2);border:1px solid var(--border);border-radius:12px;
+        box-shadow:var(--shadow);overflow:hidden;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+        font-size:.81rem;line-height:1.6}
+  .term-bar{display:flex;align-items:center;gap:.4rem;padding:.6rem .9rem;
+            border-bottom:1px solid var(--border);background:var(--card);color:var(--muted);font-size:.75rem}
+  .term-bar .dot{width:10px;height:10px;border-radius:50%;background:var(--faint)}
+  .term-bar .dot.r{background:var(--red)} .term-bar .dot.y{background:var(--yellow)} .term-bar .dot.g{background:var(--green)}
+  .term-bar .ttl{margin-left:auto;font-size:.7rem;letter-spacing:.04em}
+  .term-body{padding:.85rem 1rem}
+  .term-body .line{white-space:pre-wrap;word-break:break-all}
+  .term-body .dim{color:var(--muted)}
+  .term-body .ok{color:var(--green)}
+  .term-body .accent{color:var(--accent)}
+  .term-body .cmd{color:var(--fg);font-weight:500}
+  .term-body .prompt{color:var(--muted)}
+  .term-body .cursor{display:inline-block;width:.55em;height:1em;vertical-align:middle;
+                     background:var(--accent);animation:blink 1.1s steps(1) infinite;border-radius:1px}
+  @keyframes blink{50%{opacity:0}}
+
+  /* Flow row */
+  .flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:.65rem;align-items:stretch;margin:0 0 3.5rem}
+  .flow .node{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:.9rem 1rem}
+  .flow .node b{display:block;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;
+                color:var(--accent);font-weight:700;margin-bottom:.3rem}
+  .flow .node .name{font-weight:600;font-size:.96rem}
+  .flow .node small{display:block;color:var(--muted);font-size:.82rem;margin-top:.25rem;line-height:1.4}
+  .flow .arrow{align-self:center;color:var(--accent);font-family:ui-monospace,monospace;
+               font-size:.95rem;letter-spacing:-.05em}
+  @media (max-width:780px){ .flow{grid-template-columns:1fr} .flow .arrow{transform:rotate(90deg);padding:.1rem 0;text-align:center} }
+
+  /* Section containers */
+  section.block{margin:0 0 3.5rem}
+  section.block > h2{font-size:1.35rem;margin:0 0 .3rem;font-weight:650;letter-spacing:-.015em}
+  section.block > .tag{font-size:.7rem;letter-spacing:.15em;text-transform:uppercase;color:var(--accent);
+                       font-weight:700;margin-bottom:.4rem}
+  section.block > .kick{color:var(--muted);margin:0 0 1.5rem;max-width:58ch}
+
+  /* Uses grid */
+  .uses{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:.9rem;margin:0;padding:0}
+  .uses li{list-style:none;background:var(--card);border:1px solid var(--border);border-radius:10px;
+           padding:1rem 1.1rem;color:var(--muted);font-size:.9rem;line-height:1.5}
+  .uses li b{display:block;color:var(--fg);font-weight:600;margin-bottom:.2rem;font-size:.94rem}
+
+  /* Install card */
+  .install{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.6rem 1.8rem;box-shadow:var(--shadow)}
+  .install-item{margin-top:1.6rem}
+  .install-item:first-child{margin-top:0}
+  .install-item .label{display:flex;align-items:baseline;gap:.6rem;margin-bottom:.5rem;flex-wrap:wrap}
+  .install-item .host{font-weight:650;font-size:.98rem}
+  .install-item .path{color:var(--muted);font-family:ui-monospace,monospace;font-size:.82rem}
+
+  /* Code blocks */
+  .code{position:relative}
+  .code pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;
+       padding:.85rem 4.5rem .85rem 1rem;overflow-x:auto;margin:0;font-size:.83rem;line-height:1.55;
+       font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+       white-space:pre-wrap;word-break:break-all;color:var(--fg)}
+  .code .copy{position:absolute;top:.45rem;right:.45rem;font-size:.7rem;color:var(--muted);
+       background:var(--card);border:1px solid var(--border);padding:.3rem .55rem;border-radius:6px;
+       cursor:pointer;white-space:nowrap;transition:all .12s;
+       font-family:"Inter",ui-sans-serif,system-ui,sans-serif;font-weight:600;letter-spacing:.04em;
+       text-transform:uppercase}
+  .code .copy:hover{color:var(--fg);border-color:var(--muted)}
+  .code .copy.ok{color:var(--green);border-color:var(--green)}
+
+  /* Try-it panel */
+  .try{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.6rem 1.8rem;box-shadow:var(--shadow)}
+  .try .step{color:var(--accent);font-family:ui-monospace,monospace;font-weight:600;margin-right:.5em;font-size:.9em}
+  .try h3{margin:0 0 .85rem;font-size:1rem;font-weight:650}
+  .try .pane{margin-top:1.6rem}
+  .try .pane:first-of-type{margin-top:0}
+  .try .hint{color:var(--muted);font-size:.86rem;margin:.6rem 0 0;line-height:1.5}
+  .try .hint code{font-size:.88em}
+
+  .kv{display:flex;gap:.5rem;flex-wrap:wrap;font-size:.87rem;color:var(--muted);margin:.3rem 0}
+  .kv b{color:var(--fg);font-weight:600;min-width:4.5rem}
+  .kv .key{font-family:ui-monospace,monospace;color:var(--accent);word-break:break-all}
+
+  /* Inline */
+  code{background:var(--code-bg);padding:.12em .42em;border-radius:4px;
+       font-family:ui-monospace,monospace;font-size:.87em;border:1px solid var(--border)}
+  pre code{background:transparent;padding:0;border:0}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline;text-underline-offset:.2em}
+  .hidden{display:none}
+
+  /* Footer */
+  footer{margin-top:4rem;padding-top:2rem;border-top:1px solid var(--border);
+         font-size:.82rem;color:var(--faint);display:flex;justify-content:space-between;flex-wrap:wrap;gap:1rem}
+  footer a{color:var(--muted)}
+  footer a:hover{color:var(--fg)}
+
+  /* Soft background glow on hero */
+  .hero-bg{position:absolute;top:-10%;left:50%;transform:translateX(-50%);width:1200px;height:620px;
+           background:radial-gradient(ellipse at center, var(--accent-soft), transparent 60%);
+           pointer-events:none;z-index:-1;filter:blur(30px)}
+</style>
+</head>
+<body>
+<div class="hero-bg"></div>
+<div class="wrap">
+
+  <nav>
+    <a class="brand" href="/">remotify<span class="dot">.run</span></a>
+    <div class="links">
+      <a href="#how">how it works</a>
+      <a href="#uses">use cases</a>
+      <a href="#install">MCP install</a>
+      <a href="#try">try it</a>
+      <a href="#privacy">privacy</a>
+      <a id="source-link" href="/source" hidden>source</a>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div>
+      <span class="tagline">shell over HTTP</span>
+      <h1>Run commands on a remote box <em>without</em> SSH.</h1>
+      <p class="lede">
+        Your LLM, CI runner, or terminal pushes a command over HTTPS. The remote needs
+        only <code>curl</code> and <code>bash</code>. The relay holds nothing beyond
+        an idle session buffer.
+      </p>
+      <div class="cta">
+        <a class="btn primary" href="#install">Install the MCP</a>
+        <a class="btn ghost" href="#try">Try with just curl</a>
+      </div>
+    </div>
+
+    <div class="term" aria-label="example operator terminal">
+      <div class="term-bar">
+        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="ttl">remote.example.com: supervised</span>
+      </div>
+      <div class="term-body">
+        <div class="line"><span class="prompt">$</span> <span class="cmd">curl -fsSL 'https://remotify.run/r/a1b2...' | bash</span></div>
+        <div class="line ok">remotify: connected [supervised] - polling for commands.</div>
+        <div class="line"></div>
+        <div class="line accent">&gt;&gt;&gt; df -h /</div>
+        <div class="line prompt">Run? [y/N] <span class="cmd">y</span></div>
+        <div class="line dim">Filesystem      Size  Used Avail Use% Mounted on</div>
+        <div class="line dim">/dev/nvme0n1p2   74G   39G   32G  55% /</div>
+        <div class="line ok">&lt;&lt;&lt; done (412 bytes pushed back)</div>
+        <div class="line"></div>
+        <div class="line accent">&gt;&gt;&gt; systemctl is-active myapp</div>
+        <div class="line prompt">Run? [y/N] <span class="cmd">y</span></div>
+        <div class="line dim">active</div>
+        <div class="line ok">&lt;&lt;&lt; done (7 bytes pushed back)</div>
+        <div class="line"><span class="cursor"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section class="block" id="how">
+    <div class="tag">How it works</div>
+    <h2>Three moving parts, one HTTP pipe.</h2>
+    <p class="kick">Both sides talk only over HTTPS. Neither has to be online at the same
+      time - the relay holds one pending command and one pending result per session,
+      on disk, until the other side fetches it.</p>
+
+    <div class="flow">
+      <div class="node">
+        <b>Client</b>
+        <div class="name">LLM / CI / shell</div>
+        <small>Pushes commands via<br><code>POST /cmd-KEY</code>, reads<br>output via <code>GET /result-KEY</code>.</small>
+      </div>
+      <div class="arrow">&#9654;&#9654;</div>
+      <div class="node">
+        <b>Relay</b>
+        <div class="name">remotify.run</div>
+        <small>File-backed queue, 128-bit<br>session key, 3h idle TTL.<br>No DB, no worker.</small>
+      </div>
+      <div class="arrow">&#9664;&#9664;</div>
+      <div class="node">
+        <b>Remote</b>
+        <div class="name">curl + bash</div>
+        <small>One-liner pasted once,<br>polls the relay, runs the<br>command, posts result.</small>
+      </div>
+    </div>
+  </section>
+
+  <!-- USE CASES -->
+  <section class="block" id="uses">
+    <div class="tag">Who uses it</div>
+    <h2>Four everyday situations it fits.</h2>
+    <p class="kick">Anywhere you need to land a command on a machine that you can't or don't
+      want to reach by SSH - because there's an LLM in the loop, because there are no inbound
+      ports, or because an agent install is overkill.</p>
+
+    <ul class="uses">
+      <li><b>LLM tool calls</b>Let Claude, Cursor, Codex, or Gemini run commands on your actual server instead of pasting output back yourself.</li>
+      <li><b>CI post-deploy checks</b>Poke at release state on a box your runner can't SSH into.</li>
+      <li><b>Admin shells behind NAT</b>Outbound HTTPS is all the remote needs - no inbound ports.</li>
+      <li><b>Headless devices</b>IoT, edge gateways, rescue consoles that can dial out but not in.</li>
+    </ul>
+  </section>
+
+  <!-- INSTALL -->
+  <section class="block" id="install">
+    <div class="tag">MCP install</div>
+    <h2>Plug-and-play MCP for every major LLM host.</h2>
+    <p class="kick">Paste one line. Your LLM gains a native <code>remote_exec</code> tool via
+      MCP (Model Context Protocol) - no manual build, no global npm install, no config surgery.
+      The MCP server is fetched on first launch by <code>npx</code> and runs locally on your
+      machine.</p>
+
+    <div class="install">
+      <div class="install-item">
+        <div class="label">
+          <span class="host">Claude Code</span>
+          <span class="path">terminal CLI</span>
+        </div>
+        <div class="code">
+          <pre id="inst-claude">claude mcp add -s user remotify -- npx -y remotify-mcp@latest</pre>
+          <button class="copy" data-target="inst-claude">Copy</button>
+        </div>
+      </div>
+
+      <div class="install-item">
+        <div class="label">
+          <span class="host">Cursor</span>
+          <span class="path">~/.cursor/mcp.json</span>
+        </div>
+        <div class="code">
+          <pre id="inst-cursor">{ "mcpServers": { "remotify": { "command": "npx", "args": ["-y", "remotify-mcp@latest"] } } }</pre>
+          <button class="copy" data-target="inst-cursor">Copy</button>
+        </div>
+      </div>
+
+      <div class="install-item">
+        <div class="label">
+          <span class="host">Codex CLI</span>
+          <span class="path">~/.codex/config.toml</span>
+        </div>
+        <div class="code">
+<pre id="inst-codex">[mcp_servers.remotify]
+command = "npx"
+args    = ["-y", "remotify-mcp@latest"]</pre>
+          <button class="copy" data-target="inst-codex">Copy</button>
+        </div>
+      </div>
+
+      <div class="install-item">
+        <div class="label">
+          <span class="host">Gemini CLI</span>
+          <span class="path">~/.gemini/settings.json</span>
+        </div>
+        <div class="code">
+          <pre id="inst-gemini">{ "mcpServers": { "remotify": { "command": "npx", "args": ["-y", "remotify-mcp@latest"] } } }</pre>
+          <button class="copy" data-target="inst-gemini">Copy</button>
+        </div>
+      </div>
+
+      <div class="install-item">
+        <div class="label">
+          <span class="host">Windsurf / Continue / Cline / Zed / VS Code MCP</span>
+        </div>
+        <div class="code">
+          <pre id="inst-generic">{ "command": "npx", "args": ["-y", "remotify-mcp@latest"] }</pre>
+          <button class="copy" data-target="inst-generic">Copy</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- TRY IT -->
+  <section class="block" id="try">
+    <div class="tag">Try without installing</div>
+    <h2>Generate a session right here.</h2>
+    <p class="kick">Creates a one-time 128-bit key. Paste the listener one-liner on any
+      remote shell, push commands from another terminal. Session is discarded after 3h
+      idle; any activity on the key resets that.</p>
+
+    <div class="try">
+      <button class="btn primary" id="go">Generate session</button>
+
+      <div id="session-panel" class="hidden">
+        <div class="pane">
+          <h3><span class="step">01</span>Paste on the remote</h3>
+          <div class="code">
+            <pre id="remote-line"></pre>
+            <button class="copy" data-target="remote-line">Copy</button>
+          </div>
+          <p class="hint">Supervised: each command prints as <code>&gt;&gt;&gt; &lt;cmd&gt;</code>,
+            the operator confirms with <code>y</code>, <code>&lt;&lt;&lt; done</code> prints
+            when the result is posted back. Append <code>?mode=auto</code> to the URL for unattended execution.</p>
+        </div>
+
+        <div class="pane">
+          <h3><span class="step">02</span>Push a command</h3>
+          <div class="code">
+            <pre id="exec-line"></pre>
+            <button class="copy" data-target="exec-line">Copy</button>
+          </div>
+          <p class="hint">Replace <code>COMMAND</code>. The listener does not have to be attached
+            when you push; the command waits until it's picked up.</p>
+        </div>
+
+        <div class="pane">
+          <h3><span class="step">03</span>Session info</h3>
+          <div class="kv"><b>Key</b><span class="key" id="key"></span></div>
+          <div class="kv"><b>Idle TTL</b><span id="ttl"></span></div>
+          <div class="kv"><b>API</b><a id="api-link" href="#">/api/session/&lt;key&gt;</a></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PRIVACY / TRANSPARENCY -->
+  <section class="block" id="privacy">
+    <div class="tag">Privacy &amp; transparency</div>
+    <h2>Open source. Data-minimised by design.</h2>
+    <p class="kick">remotify.run is Apache-2.0 open source, so you can audit the wire protocol
+      and the relay yourself. The relay is built on Datensparsamkeit (data minimisation):
+      it keeps the smallest possible footprint for each session and throws it away as soon
+      as it can.</p>
+
+    <ul class="uses">
+      <li><b>No accounts, no identity.</b>Session keys are 128-bit random hex. Nothing ties a key to a person, email, or billing record.</li>
+      <li><b>Ephemeral session data.</b>A per-session directory holds the pending command, pending result, and a short push history. Purged on 3h idle or explicit DELETE.</li>
+      <li><b>No telemetry from the MCP.</b>The <code>remotify-mcp</code> package only talks to the relay you point it at. No analytics, no crash reporting.</li>
+      <li><b>Ready to use for free, or self-host.</b>Hit <code>remotify.run</code> directly with zero setup, or run the exact same relay on your own machine with one <code>docker compose up</code> and point MCP hosts there via <code>REMOTIFY_URL</code>.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <div>
+      &copy; <span id="cpyear">2026</span> <a href="https://www.online-solution.biz/" rel="noopener">Online Solution</a>
+      &nbsp;&middot;&nbsp;
+      remotify.run, Apache-2.0
+    </div>
+    <div>
+      <a href="https://www.npmjs.com/package/remotify-mcp" rel="noopener">remotify-mcp on npm</a>
+      &nbsp;&middot;&nbsp;
+      <a href="/api/health">API health</a>
+    </div>
+  </footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const state = { session:null };
+
+// Keep the footer copyright year fresh without another deploy.
+$('cpyear').textContent = new Date().getFullYear();
+
+fetch('/api/source').then(r => r.ok ? r.json() : null).then(d => {
+  if (d && d.url) { const el = $('source-link'); el.href = d.url; el.hidden = false; }
+}).catch(() => {});
+
+function render() {
+  const s = state.session; if (!s) return;
+  $('key').textContent = s.key;
+  $('ttl').textContent = s.ttl_seconds + 's';
+  $('api-link').href   = s.urls.api;
+  $('remote-line').textContent = s.remote_quickstart;
+  $('exec-line').textContent   = s.exec;
+  $('session-panel').classList.remove('hidden');
+}
+
+$('go').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'Generating...';
+  try {
+    const r = await fetch('/api/session', { method:'POST' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    state.session = await r.json();
+    render();
+    btn.textContent = 'Generate new session';
+  } catch (err) {
+    alert('Could not create session: ' + err.message);
+    btn.textContent = orig;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.querySelectorAll('.copy').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const text = document.getElementById(btn.dataset.target).textContent;
+    try { await navigator.clipboard.writeText(text); } catch { return; }
+    const orig = btn.textContent;
+    btn.classList.add('ok');
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.classList.remove('ok'); btn.textContent = orig; }, 1200);
+  });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,67 @@
+limit_req_zone $binary_remote_addr zone=session_create:10m rate=${RATE_LIMIT};
+
+upstream remotify_api { server api:9000; }
+
+gzip on;
+gzip_vary on;
+gzip_comp_level 5;
+gzip_min_length 1024;
+gzip_proxied any;
+gzip_types text/plain text/css text/javascript text/x-shellscript application/json application/javascript application/octet-stream;
+
+# HTTP: ACME challenge + redirect to HTTPS
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+
+    location / { return 301 https://$host$request_uri; }
+}
+
+# HTTPS: all traffic
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1h;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location = /api/session {
+        limit_req zone=session_create burst=${RATE_LIMIT_BURST} nodelay;
+        include fastcgi_params;
+        fastcgi_pass  remotify_api;
+        fastcgi_param SCRIPT_FILENAME /var/www/html/index.php;
+        fastcgi_param SCRIPT_NAME     /index.php;
+        fastcgi_param REQUEST_URI     $request_uri;
+    }
+
+    location ~ ^/(api|r|cmd-|result-) {
+        include fastcgi_params;
+        fastcgi_pass  remotify_api;
+        fastcgi_param SCRIPT_FILENAME /var/www/html/index.php;
+        fastcgi_param SCRIPT_NAME     /index.php;
+        fastcgi_param REQUEST_URI     $request_uri;
+        client_max_body_size ${MAX_BODY_SIZE};
+        fastcgi_read_timeout ${PROXY_TIMEOUT}s;
+    }
+
+    location = /source {
+        include fastcgi_params;
+        fastcgi_pass  remotify_api;
+        fastcgi_param SCRIPT_FILENAME /var/www/html/index.php;
+        fastcgi_param SCRIPT_NAME     /index.php;
+        fastcgi_param REQUEST_URI     $request_uri;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}

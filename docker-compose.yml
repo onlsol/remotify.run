@@ -1,0 +1,86 @@
+name: remotify
+
+services:
+  api:
+    build: ./php
+    restart: unless-stopped
+    environment:
+      DOMAIN:       ${DOMAIN}
+      SCHEME:       ${SCHEME}
+      PUBLIC_PORT:  ${PUBLIC_PORT}
+      SESSION_TTL:  ${SESSION_TTL}
+      AUDIT_LOG:    ${AUDIT_LOG}
+      SOURCE_URL:   ${SOURCE_URL}
+    volumes:
+      - ./data/sessions:/var/data/sessions
+    networks: [internal]
+
+  nginx:
+    build: ./nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT}:80"
+      - "${HTTPS_PORT}:443"
+    environment:
+      DOMAIN:            ${DOMAIN}
+      NGINX_MODE:        ${NGINX_MODE}
+      RATE_LIMIT:        ${RATE_LIMIT}
+      RATE_LIMIT_BURST:  ${RATE_LIMIT_BURST}
+      PROXY_TIMEOUT:     ${PROXY_TIMEOUT}
+      MAX_BODY_SIZE:     ${MAX_BODY_SIZE}
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    depends_on: [api]
+    networks: [internal]
+
+  certbot:
+    image: certbot/certbot:latest
+    profiles: ["tls"]
+    restart: unless-stopped
+    environment:
+      DOMAIN:           ${DOMAIN}
+      CERTBOT_EMAIL:    ${CERTBOT_EMAIL}
+      CERTBOT_STAGING:  ${CERTBOT_STAGING}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        : "$${CERTBOT_EMAIL:?CERTBOT_EMAIL required for tls profile}"
+        STAGING=""
+        [ "$$CERTBOT_STAGING" = "1" ] && STAGING="--staging"
+        CERT="/etc/letsencrypt/live/$$DOMAIN/fullchain.pem"
+        if [ -f "$$CERT" ]; then
+          SUBJ=$$(openssl x509 -in "$$CERT" -noout -subject 2>/dev/null | sed 's/^subject= *//')
+          ISSU=$$(openssl x509 -in "$$CERT" -noout -issuer  2>/dev/null | sed 's/^issuer= *//')
+          if [ "$$SUBJ" = "$$ISSU" ]; then
+            echo "remotify-certbot: replacing bootstrap self-signed cert"
+            rm -rf /etc/letsencrypt/live/$$DOMAIN \
+                   /etc/letsencrypt/archive/$$DOMAIN \
+                   /etc/letsencrypt/renewal/$$DOMAIN.conf
+          fi
+        fi
+        if [ ! -f "$$CERT" ]; then
+          certbot certonly --webroot -w /var/www/certbot \
+            -d "$$DOMAIN" \
+            --email "$$CERTBOT_EMAIL" \
+            --agree-tos --no-eff-email --non-interactive \
+            $$STAGING
+        fi
+        trap exit TERM
+        while :; do
+          sleep 12h & wait $${!}
+          certbot renew --webroot -w /var/www/certbot --quiet
+        done
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    networks: [internal]
+
+volumes:
+  letsencrypt:
+  certbot-www:
+
+networks:
+  internal:
+    driver: bridge

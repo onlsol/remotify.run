@@ -1,0 +1,120 @@
+# remotify.run - remote command execution for this project
+
+This project has a remote shell reachable via a relay at
+**https://remotify.run** (or a self-hosted instance; check this project's
+`.env` / `docker-compose.yml` if unsure). The remote is where the project
+actually runs in staging/production; your local machine is not.
+
+## Routing rule (IMPORTANT - read before using any shell tool)
+
+Decide per-command where it should execute:
+
+- **Goes to the REMOTE** (via `remote_exec` tool if available, otherwise via
+  curl as described below): anything that asks about the project's remote
+  environment - "the server", "production", "staging", "the deployed DB",
+  "the live app logs", system state on the remote host, etc.
+
+- **Goes to your LOCAL shell/Bash tool**: anything about this repo on the
+  developer's machine - `git log`, `git status`, running local tests,
+  reading files in the working tree, local build commands.
+
+Do **not** fall back to the local tool for a remote question, and do not
+push remote commands through the local tool. They run on different machines.
+
+### Chain freely - don't ask per step
+
+Iterative remote work is the common case: log analysis (grep, awk, sed,
+head, tail, cut), narrowing a search, diagnosing a slow service with
+ps/vmstat/netstat/iostat, poking around `/proc`, cross-checking outputs.
+Run the sequence yourself, show the user the meaningful result or the
+synthesis - do not copy each raw command back into chat and ask them to
+run it. That manual copy-paste loop is exactly what this tool eliminates.
+In supervised mode the operator already gets a `y/N` prompt per command
+on the remote shell, so consent is covered; you do not need to also ask
+the user again.
+
+## If your host has MCP (and the remotify MCP server is wired in)
+
+There is a `remote_exec(command)` tool. Call it for every remote-targeted
+operation. Don't ask the user which tool to use; route silently.
+
+Example:
+> User: "check disk usage on the server"
+> You: call `remote_exec("df -h")`, then show the output.
+
+## If your host does not have MCP
+
+Use your local Bash/shell tool to hit the HTTP API directly.
+
+### Once per session
+
+```bash
+curl -s -X POST https://remotify.run/api/session
+```
+
+The JSON response contains:
+- `key` - 32-char session key
+- `remote_quickstart` - the single line to show the user so they can paste
+  it on the remote shell. Show it to them verbatim and ask them to paste
+  it on the remote. Supervised mode is default; they can append
+  `?mode=auto` themselves for unattended operation.
+
+Wait for the user to confirm they've pasted it before pushing commands.
+
+### For every command
+
+```bash
+# 1. enqueue the command
+curl -s --data-raw 'YOUR COMMAND HERE' https://remotify.run/cmd-KEY
+
+# 2. poll for the result (listener may take time to approve)
+while :; do
+  CODE=$(curl -fs -o /tmp/.r -w '%{http_code}' https://remotify.run/result-KEY)
+  [ "$CODE" = 200 ] && { cat /tmp/.r; break; }
+  sleep 1
+done
+```
+
+### Response-code hints
+
+- **201** on push: queued. Pushing again while something is already queued
+  replaces it (last-wins rotation); the previous push is archived.
+- **200** on result fetch: output is in the body.
+- **204** on result fetch: nothing queued yet, keep polling.
+- **410**: the session expired (idle TTL, default 3h) or the key is
+  unknown. Create a new session and re-instruct the user.
+
+### What the operator sees on the remote
+
+Every queued command is printed on the remote as `>>> <cmd>` before it runs,
+and `<<< done (N bytes pushed back)` after the result is posted back. In
+supervised mode a `y/N` prompt sits between those lines (any answer starting
+with `y` / `Y` runs it; anything else is recorded as `[declined by operator]`).
+The runner also exports a non-interactive env block (`DEBIAN_FRONTEND=noninteractive`,
+`CI=true`, `TERM=dumb`, `PAGER=cat`, `SYSTEMD_PAGER=cat`, `GIT_TERMINAL_PROMPT=0`)
+so apt, pagers, and git don't hang waiting for TTY input.
+
+## Security and trust
+
+- Commands run as whatever user pasted the listener on the remote. Same
+  trust model as `ssh user@host 'cmd'`. Do not recommend running the
+  listener on a shell you would not SSH into.
+- Output is raw bytes. Do not assume UTF-8 for binary or mixed-content
+  commands.
+- Do not flip the remote into auto mode (`?mode=auto`) without explicit
+  user consent. Supervised is the safe default.
+
+## When to avoid remote_exec / the remote entirely
+
+- Interactive programs (`vim`, `less`, `sudo` prompts without NOPASSWD) -
+  the relay is one-shot per command.
+- Commands that stream indefinitely (`tail -f`, `top`) - they block the
+  listener until the user interrupts it.
+
+## Ending a session
+
+```bash
+curl -sX DELETE https://remotify.run/api/session/KEY
+```
+
+Or just let it expire. Everything queued under the session is discarded.
