@@ -6,10 +6,17 @@
 .env.local
 .env.*.local
 
+# Live relay state: per-session dirs hold session keys + command/result content.
+# Must never be committed.
+/data/
+
 # Node (MCP server deps are installed by the user)
 mcp/node_modules/
 mcp/package-lock.json
 mcp/npm-debug.log*
+
+# Stray tool/workspace dirs anywhere in the tree
+.omc/
 
 # OS + editor crumbs
 .DS_Store

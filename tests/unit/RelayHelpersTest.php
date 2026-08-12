@@ -166,6 +166,57 @@ final class RelayHelpersTest extends TestCase
     }
 
     // -----------------------------------------------------------------
+    // Stale in-flight self-heal
+    // -----------------------------------------------------------------
+
+    public function testSelfHealNoopWhenIdle(): void
+    {
+        $k = $this->key('sh-idle');
+        create_session($k);
+        $this->assertFalse(self_heal_stale_inflight($k));
+        $this->assertNull(read_queue($k, 'result'), 'no synthetic result on an idle session');
+    }
+
+    public function testSelfHealNoopWhileCmdStillQueued(): void
+    {
+        // A queued-but-unconsumed cmd is "waiting for pickup", not in-flight.
+        $k = $this->key('sh-queued');
+        create_session($k);
+        write_queue($k, 'cmd', 'echo hi');
+        $this->assertFalse(self_heal_stale_inflight($k));
+        $this->assertSame('echo hi', read_queue($k, 'cmd'), 'queued cmd untouched');
+    }
+
+    public function testSelfHealRespectsGraceOnFreshInflight(): void
+    {
+        $k = $this->key('sh-fresh');
+        create_session($k);
+        write_queue($k, 'cmd', 'echo hi');
+        read_queue($k, 'cmd');
+        mark_cmd_consumed($k);
+        clearstatcache();
+        $this->assertFalse(self_heal_stale_inflight($k), 'within the 2s grace: no heal');
+        $this->assertTrue(cmd_in_flight($k), 'still in flight');
+    }
+
+    public function testSelfHealClearsStaleInflightAndQueuesMarker(): void
+    {
+        $k = $this->key('sh-stale');
+        create_session($k);
+        write_queue($k, 'cmd', 'echo hi');
+        read_queue($k, 'cmd');
+        mark_cmd_consumed($k);
+        touch(session_dir($k) . '/_phase', time() - 10); // backdate past the grace
+        clearstatcache();
+        $this->assertTrue(self_heal_stale_inflight($k));
+        clearstatcache();
+        $this->assertFalse(cmd_in_flight($k), 'phase flipped back to idle');
+        $result = read_queue($k, 'result');
+        $this->assertNotNull($result, 'synthetic result queued for the waiting client');
+        $this->assertStringStartsWith('[remotify: ', $result);
+    }
+
+    // -----------------------------------------------------------------
     // Payload + runner_script shape
     // -----------------------------------------------------------------
 
@@ -218,5 +269,11 @@ final class RelayHelpersTest extends TestCase
         // a value it doesn't recognize.
         $s = runner_script($this->key('weird'), 'banana');
         $this->assertStringStartsWith('#!/usr/bin/env bash', $s);
+        // Guard against an approval-bypass regression: an unrecognized mode
+        // must fall back to the safe supervised behavior (prompts before
+        // running, self-identifies as supervised), never to auto.
+        $this->assertStringContainsString('[supervised]', $s);
+        $this->assertStringContainsString('Run? [y/N]',   $s);
+        $this->assertStringNotContainsString('[auto]',     $s);
     }
 }

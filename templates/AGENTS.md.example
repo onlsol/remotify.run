@@ -64,14 +64,19 @@ Wait for the user to confirm they've pasted it before pushing commands.
 ### For every command
 
 ```bash
-# 1. enqueue the command
-curl -s --data-raw 'YOUR COMMAND HERE' https://remotify.run/cmd-KEY
+# 1. enqueue the command, verifying the push actually landed
+P=$(curl -s -o /dev/null -w '%{http_code}' --data-raw 'YOUR COMMAND HERE' https://remotify.run/cmd-KEY)
+[ "$P" = 201 ] || { echo "remotify: push failed (HTTP $P)" >&2; exit 1; }
 
 # 2. poll for the result (listener may take time to approve)
+T=$(mktemp 2>/dev/null || echo "/tmp/remotify-exec.$$")
 while :; do
-  CODE=$(curl -fs -o /tmp/.r -w '%{http_code}' https://remotify.run/result-KEY)
-  [ "$CODE" = 200 ] && { cat /tmp/.r; break; }
-  sleep 1
+  CODE=$(curl -s -o "$T" -w '%{http_code}' https://remotify.run/result-KEY)
+  case "$CODE" in
+    200) cat "$T"; rm -f "$T"; break ;;
+    410) echo "remotify: session gone - create a new session and re-instruct the user" >&2; rm -f "$T"; exit 1 ;;
+    *) sleep 1 ;;
+  esac
 done
 ```
 
@@ -83,16 +88,42 @@ done
 - **204** on result fetch: nothing queued yet, keep polling.
 - **410**: the session expired (idle TTL, default 3h) or the key is
   unknown. Create a new session and re-instruct the user.
+- **A `[remotify: ...]` body** on result fetch is a synthetic recovery
+  marker, not command output: the listener died mid-command and the relay
+  cleared the wedge when a listener reconnected. The command's real output
+  is lost; decide whether re-running it is safe before pushing it again.
+
+### If the session looks wedged
+
+If results stop arriving and `GET /api/session/KEY/status` shows
+`"cmd_in_flight": true` long after the command should have finished, the
+listener likely died mid-command. Reconnecting the listener heals it
+automatically; to clear it by hand instead:
+
+```bash
+curl -s -X POST https://remotify.run/api/session/KEY/reset
+```
+
+This drops any queued command/result and clears the in-flight marker while
+keeping the session and key usable.
 
 ### What the operator sees on the remote
 
 Every queued command is printed on the remote as `>>> <cmd>` before it runs,
 and `<<< done (N bytes pushed back)` after the result is posted back. In
 supervised mode a `y/N` prompt sits between those lines (any answer starting
-with `y` / `Y` runs it; anything else is recorded as `[declined by operator]`).
-The runner also exports a non-interactive env block (`DEBIAN_FRONTEND=noninteractive`,
-`CI=true`, `TERM=dumb`, `PAGER=cat`, `SYSTEMD_PAGER=cat`, `GIT_TERMINAL_PROMPT=0`)
-so apt, pagers, and git don't hang waiting for TTY input.
+with `y` / `Y` runs it; anything else is recorded as `[declined by operator]`);
+supervised mode requires an attached terminal, and the runner exits with a
+message pointing at `?mode=auto` if none is present (e.g. run via `nohup` or a
+non-interactive pipe). The runner also exports a non-interactive env block
+(`DEBIAN_FRONTEND=noninteractive`, `CI=true`, `TERM=dumb`, `PAGER=cat`,
+`SYSTEMD_PAGER=cat`, `GIT_TERMINAL_PROMPT=0`) so apt, pagers, and git don't
+hang waiting for TTY input. A command that exits non-zero gets a trailing
+`[remotify: exit status N]` marker appended to its output so you can tell
+success from failure; very large output is truncated to a head plus a
+truncation marker instead of being lost. Result pushes are gzip-compressed
+when `gzip` is available on the remote, falling back to a plain POST when
+it isn't.
 
 ## Security and trust
 

@@ -5,12 +5,22 @@ services:
     build: ./php
     restart: unless-stopped
     environment:
-      DOMAIN:       ${DOMAIN}
-      SCHEME:       ${SCHEME}
-      PUBLIC_PORT:  ${PUBLIC_PORT}
-      SESSION_TTL:  ${SESSION_TTL}
-      AUDIT_LOG:    ${AUDIT_LOG}
-      SOURCE_URL:   ${SOURCE_URL}
+      DOMAIN:          ${DOMAIN}
+      SCHEME:          ${SCHEME}
+      PUBLIC_PORT:     ${PUBLIC_PORT}
+      SESSION_TTL:     ${SESSION_TTL}
+      AUDIT_LOG:       ${AUDIT_LOG}
+      SOURCE_URL:      ${SOURCE_URL}
+      # Long-poll window (ms) each GET /cmd|/result holds a worker. Must stay
+      # comfortably below nginx PROXY_TIMEOUT (fastcgi_read_timeout).
+      LONGPOLL_MS:     ${LONGPOLL_MS}
+      # Single source of truth for the body cap: the entrypoint converts this
+      # nginx-syntax size (e.g. 25m) into the byte count PHP's zip-bomb guard
+      # uses, so the wire cap and the decoded cap can never drift apart.
+      MAX_BODY_SIZE:   ${MAX_BODY_SIZE}
+      # FPM pool ceiling. Each active session pins ~2 long-poll workers, so this
+      # bounds concurrent sessions. Raise on busy hosts, lower on tiny ones.
+      FPM_MAX_CHILDREN: ${FPM_MAX_CHILDREN}
     volumes:
       - ./data/sessions:/var/data/sessions
     networks: [internal]

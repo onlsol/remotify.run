@@ -1,10 +1,11 @@
 {
   "name": "remotify-mcp",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "MCP server for remotify.run. Gives any LLM (Claude Code, Cursor, Codex, Gemini, etc.) a remote_exec tool where the remote operator approves each command and output flows back - ending the chat-to-shell copy-paste loop for log grepping, service checks, and iterative diagnostics.",
   "type": "module",
   "bin": { "remotify-mcp": "./server.js" },
   "main": "server.js",
+  "scripts": { "test": "node --test" },
   "engines": { "node": ">=18" },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"

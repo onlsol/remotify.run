@@ -11,8 +11,10 @@ port, installing an agent, or deploying anything:
 - Admin shells behind NAT / firewalls
 - Headless devices reachable only outbound
 
-Nothing persists on the server - the relay is a pure byte pipe. Session keys
-are 128-bit random; traffic flows only while both sides are attached.
+Data on the relay is minimised, not absent: each session gets a small
+directory holding the pending command/result and a timestamped push history,
+purged as soon as the idle TTL lapses (default 3h) or on explicit delete.
+Session keys are 128-bit random.
 
 ## Architecture
 
@@ -54,14 +56,27 @@ are 128-bit random; traffic flows only while both sides are attached.
 | PHP-FPM | Session API, runner script generator, file-backed queue | Yes |
 | certbot | Automatic TLS issuance + renewal (optional, `--profile tls`) | No |
 
-No database. No worker. The only persistent state is a flat-file queue under `/data/sessions/<KEY>/`.
+No database. No worker. The only persistent state is a flat-file queue under
+`data/sessions/<KEY>/` (bind-mounted from the host into the container at
+`/var/data/sessions/<KEY>/`), data-minimised and purged on idle TTL or
+explicit delete.
 
 ## Quick start
 
 ```bash
 cp .env.example .env
-# edit DOMAIN / SCHEME for your deployment
-docker compose up -d                       # HTTP only (use behind your own reverse proxy)
+docker compose up -d
+```
+
+The shipped `.env.example` defaults to a self-consistent local HTTP setup -
+no editing required for a first run. After the command above, the API and
+the one-liners it hands out are both reachable at `http://localhost:49180`.
+
+For a public deployment, edit `.env` first: set `DOMAIN` to your real
+hostname, `SCHEME=https`, `NGINX_MODE=tls`, `HTTP_PORT=80` (required so
+Let's Encrypt's HTTP-01 challenge is reachable) and `HTTPS_PORT=443`, then:
+
+```bash
 docker compose --profile tls up -d         # HTTP + HTTPS with automatic TLS
 ```
 
@@ -75,17 +90,25 @@ All knobs live in `.env`; nothing is hardcoded.
 |-----|-----------------|---------|
 | `DOMAIN` | `localhost` | Public hostname for the API / landing page |
 | `SCHEME` | `http` | `http` or `https` - baked into returned one-liners |
-| `PUBLIC_PORT` | _(empty)_ | Set only when serving on a non-standard port |
+| `PUBLIC_PORT` | `49180` | Port baked into generated URLs. Leave empty for the standard port of `SCHEME` (80/443) |
 | `NGINX_MODE` | `http` | `http` or `tls`. `tls` requires `--profile tls` |
-| `HTTP_PORT` / `HTTPS_PORT` | `80` / `443` | Host ports published by nginx |
+| `HTTP_PORT` / `HTTPS_PORT` | `49180` / `49443` | Host ports published by nginx. Public HTTPS deploy: `80` / `443` (80 is required for the ACME HTTP-01 challenge) |
 | `RATE_LIMIT` | `10r/m` | Per-IP rate on `POST /api/session` (nginx `limit_req` syntax) |
 | `RATE_LIMIT_BURST` | `5` | Burst slots before 503 |
-| `PROXY_TIMEOUT` | `3600` | Max seconds either side of a pipe waits for the other end |
-| `MAX_BODY_SIZE` | `25m` | nginx `client_max_body_size` on the queue endpoints. Caps a single push. Set `0` for unlimited. |
+| `PROXY_TIMEOUT` | `3600` | Max seconds either side of a pipe waits for the other end. Must comfortably exceed `LONGPOLL_MS` |
+| `MAX_BODY_SIZE` | `25m` | Single source of truth for body-size limits: nginx `client_max_body_size` on the queue endpoints, and the API derives its raw-body cap (`post_max_size`), memory limit, and its gzip zip-bomb decoded-size cap (3x this value) from it, so none of them can drift apart. `0` = unlimited at the nginx layer (PHP still keeps a finite decoded cap for safety) |
+| `LONGPOLL_MS` | `15000` | Long-poll window (ms) `GET /cmd-{key}` / `GET /result-{key}` hold an empty slot open before returning `204`, so listeners pick up work sub-second instead of on the next poll tick |
+| `FPM_MAX_CHILDREN` | `64` | PHP-FPM pool size. Each active session pins ~2 workers for up to `LONGPOLL_MS` at a time, so this bounds how many sessions can be live concurrently before other requests start queueing |
 | `SESSION_TTL` | `10800` | Idle TTL for a session (seconds). Every request on the key resets it; expired sessions are purged with their queue + history. |
 | `AUDIT_LOG` | `0` | `1` = log key generation to container stderr |
 | `CERTBOT_EMAIL` | _(required for tls profile)_ | Contact address used when requesting certs from the ACME CA |
 | `CERTBOT_STAGING` | `0` | `1` = use the ACME staging environment (test-only certs, avoids rate limits) |
+
+The defaults above are a ready-to-run local HTTP setup - `cp .env.example .env
+&& docker compose up -d` gives a working roundtrip at `http://localhost:49180`
+with no edits. A public HTTPS deploy needs `DOMAIN` set to your real hostname,
+`SCHEME=https`, `NGINX_MODE=tls`, `HTTP_PORT=80` (for the ACME HTTP-01
+challenge) and `HTTPS_PORT=443`.
 
 Behind your own reverse proxy? Skip the `tls` profile. Point your proxy at
 `HTTP_PORT` on localhost and terminate TLS there.
@@ -108,9 +131,26 @@ Re-fetch the same payload for a known key. Touches the session (resets its idle
 timer) without consuming anything queued.
 
 ### `GET /api/session/{key}/status`
-Cheap probe: returns `{cmd_queued, result_queued}` without consuming anything.
+Cheap probe: returns `{cmd_queued, result_queued, cmd_in_flight,
+cmd_in_flight_seconds_ago, listener_seen_seconds_ago}` without consuming
+anything:
+
+- `cmd_queued` / `result_queued` - whether a command/result is currently sitting in the hot slot.
+- `cmd_in_flight` - a command was picked up by the listener and no result has been pushed back yet.
+- `cmd_in_flight_seconds_ago` - seconds since that pickup (`null` when nothing is in flight).
+- `listener_seen_seconds_ago` - seconds since the listener last polled `GET /cmd-{key}` (`null` if it never has).
+
 Used by the MCP server to detect whether the listener has already picked up the
 queued command.
+
+### `POST /api/session/{key}/reset`
+Recovery endpoint: drops any queued command, any queued result, and clears the
+in-flight marker, while keeping the session (key, TTL, connected listener)
+alive. Returns what it actually cleared:
+`{"reset": true, "cleared": {"cmd_queued": ..., "result_queued": ..., "cmd_was_in_flight": ...}}`.
+Rarely needed by hand — the relay self-heals a wedged in-flight marker as soon
+as the listener reconnects, and the MCP server resets stale state on its own —
+but useful for scripts and as an operator escape hatch.
 
 ### `DELETE /api/session/{key}`
 Purges the session directory (queued cmd/result + any archived pushes) and
@@ -122,6 +162,19 @@ the hot command slot - used by the listener. Last-write-wins: pushing while a
 command is already queued replaces it; the old bytes survive as a timestamped
 archive.
 
+GET **long-polls**: if the slot is empty the PHP worker holds the connection
+open (up to `LONGPOLL_MS`, default 15s) and returns the instant a command is
+pushed - sub-second pickup in practice - or `204` once the deadline passes.
+Pass `?nowait=1` to disable the hold and get an immediate `204`/body, useful
+for synchronous probes.
+
+A GET also **self-heals a wedged session**: polling for new work while a
+command is still marked in-flight proves that command's executor is gone (an
+executing listener never polls), so the relay clears the marker and queues a
+synthetic `[remotify: ...]` result for whoever is still waiting on it. A
+listener that died mid-command (kill -9, closed terminal, reboot) therefore
+stops blocking the session the moment it - or a replacement - reconnects.
+
 ### `DELETE /cmd-{key}`
 Drops the hot command slot without consuming (no archive, no listener side
 effects). Used by the MCP server to cancel its own queued command when it
@@ -130,7 +183,8 @@ when one eventually connects.
 
 ### `POST /result-{key}` / `GET /result-{key}`
 Symmetric endpoints for the listener to post results and the client to fetch
-them.
+them. `GET /result-{key}` long-polls exactly like `GET /cmd-{key}` (same
+`LONGPOLL_MS` window, same `?nowait=1` escape hatch).
 
 ### `GET /r/{key}?mode=supervised|auto`
 Returns a ready-to-`bash` runner script. The remote operator runs:
@@ -153,6 +207,16 @@ The runner exports a non-interactive env block (`DEBIAN_FRONTEND=noninteractive`
 before executing each command, so apt, pagers, and git don't block on TTY input.
 Sudo still prompts unless the caller uses `sudo -n` - the operator sees the
 preview line and can choose to authenticate.
+
+`supervised` mode needs an attached terminal to ask `y/N`; if none is present
+(nohup, CI, piped in from something other than an interactive shell) the
+runner exits immediately with a message pointing at `?mode=auto` instead of
+hanging. The output of any command that exits non-zero gets a trailing
+`[remotify: exit status N]` marker so the client can tell success from
+failure; very large output is truncated to a head plus a marker rather than
+dropped or rejected outright. Result pushes are gzip-compressed when `gzip`
+is available on the remote, falling back to a plain POST when it isn't, so a
+box with only `curl` + `bash` still works.
 
 ### `GET /api/health`
 Returns `{"ok": true, "service": "remotify.run"}`.
@@ -230,7 +294,7 @@ All snippets above default to `https://remotify.run`. If you self-host, add one 
 
 If it speaks HTTP, it can talk to remotify.run. The only API call needed to
 get started is `POST /api/session`; everything after that is an HTTP GET or
-POST against the `pipe.` subdomain.
+POST against `DOMAIN` - there is no separate `pipe.` subdomain, it's all one vhost.
 
 ## Security model
 
@@ -239,8 +303,10 @@ POST against the `pipe.` subdomain.
 - **TLS is mandatory in production.** Keys travel in URL paths; HTTPS prevents
   interception.
 - **nginx rate-limits** `POST /api/session` per IP (see `RATE_LIMIT`).
-- **No server-side persistence.** Commands and output stream through in memory
-  and are forgotten when the pipe closes.
+- **Data-minimised persistence.** Each session's pending command/result and
+  push history live in a `0700` directory on the relay host, readable only by
+  the PHP worker user. Kept only as long as needed: purged on the idle TTL
+  (default 3h) or an explicit `DELETE`.
 - **Supervised mode on the remote.** `/r/KEY?mode=supervised` prompts `y/N`
   before running each incoming command.
 - **`--data-raw`** (rather than plain `-d` / `--data`) is used throughout to
